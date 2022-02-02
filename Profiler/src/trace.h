@@ -1,6 +1,8 @@
 #pragma once
 #include <stdint.h>
 
+#ifdef TRACING_ENABLE
+
 namespace Tracing {
   using u64 = uint64_t;
 
@@ -35,3 +37,7 @@ namespace Tracing {
 #define TRACING_JOIN(a, b) TRACING_JOIN2(a, b)
 
 #define TRACING_SCOPE(name) Tracing::AUTO_SCOPE_EVENT TRACING_JOIN(_tracer_, __LINE__) (name)
+
+#else 
+#define TRACING_SCOPE(name) (void)0
+#endif
