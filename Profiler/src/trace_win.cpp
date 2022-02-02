@@ -19,6 +19,8 @@ static HANDLE out_file_handle = INVALID_HANDLE_VALUE;
 static Tracing::u64 start_timer = 0;
 static Tracing::u64 freq = 0;
 
+static HANDLE thread_handle = INVALID_HANDLE_VALUE;
+
 #define WRITE_STATIC_STRING(file, str) WriteFile(file, str, sizeof(str) - 1, 0, 0)
 
 #define INTERLOCKED_READ(var) _InterlockedCompareExchange(&var, 0, 0)
@@ -166,7 +168,7 @@ void Tracing::start_tracer_threaded(const char* output_file_name) {
   const auto check = _InterlockedCompareExchange(&buffer_top, 0, 0);
   assert(check == 0);
 
-  CreateThread(0, 0, tracer_thread_proc, 0, 0, 0);
+  thread_handle = CreateThread(0, 0, tracer_thread_proc, 0, 0, 0);
 }
 
 void Tracing::end_tracer_threaded() {
@@ -174,7 +176,7 @@ void Tracing::end_tracer_threaded() {
   auto val = _InterlockedExchange(&signal, 1);
   assert(val == 0);
 
-  //return INTERLOCKED_READ(overhead);
+  WaitForSingleObject(thread_handle, INFINITE);
 }
 
 Tracing::u64 Tracing::get_time() {
