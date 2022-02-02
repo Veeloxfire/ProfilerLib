@@ -59,12 +59,11 @@ static void write_decimal_number(HANDLE file, Tracing::u64 num) {
     return;
   }
 
-  //array count + 1 for null
   char buffer[array_count(DEC_DIGITS) + 1] ={ 0 };
   u64 index = 0;
 
   //Array count + 1 so that 0 can signal the finish
-  u64 max_ind = array_count(DEC_DIGITS) + 1;
+  u64 max_ind = array_count(DEC_DIGITS);
 
   //SHouldnt need to check if max_ind > 0 because num will always have digits
   while (DEC_DIGITS[max_ind - 1] > num) {
