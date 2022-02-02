@@ -1,9 +1,21 @@
-# ProfilerLib
+# TracerLib
 Simple Tracing Library
 
+Look at src/example.cpp to see how it is used
 
-Produces a google tracing json object from your code
+This library produces a google tracing json file from your code
 
-Simply put `TRACING_SCOPE("Zone name")` in the scope you want to get traced
+You can then use this with whatever trace viewer you prefer
 
-Currently only supports windows
+# Why things are as they are
+
+This was developed as part of instrumentation for the Axle compiler
+Any features/bugs exist because of the needs of that project
+
+# Planned features/current limitations
+
+- Currently only supports windows
+- Currently has no protection against running over the buffer on the client side
+- Currently *MUST* use another thread to do the writing (this might affect highly threaded applications in the future?)
+- Currently only supports one thread and one process id
+
