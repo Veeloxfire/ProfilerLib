@@ -37,7 +37,9 @@ namespace Tracing {
 #define TRACING_JOIN(a, b) TRACING_JOIN2(a, b)
 
 #define TRACING_SCOPE(name) Tracing::AUTO_SCOPE_EVENT TRACING_JOIN(_tracer_, __LINE__) (name)
+#define TRACING_FUNCTION() TRACING_SCOPE(__FUNCTION__)
 
-#else 
+#else
 #define TRACING_SCOPE(name) (void)0
+#define TRACING_FUNCTION() (void)0
 #endif

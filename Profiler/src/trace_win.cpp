@@ -151,7 +151,7 @@ void Tracing::start_tracer_threaded(const char* output_file_name) {
 
   QueryPerformanceFrequency(&la);
 
-  freq = la.QuadPart / 1000;
+  freq = la.QuadPart / (1000 *  1000);
 
   QueryPerformanceCounter(&la);
 
