@@ -4,154 +4,226 @@
 #include <assert.h>
 #include <intrin.h>
 
+using u8 = uint8_t;
+using u16 = uint16_t;
 using u32 = uint32_t;
 using u64 = uint64_t;
 
-static u32 signal = 0;
-static u64 overhead = 0;
+volatile static u32 signal = 0;
+volatile static u64 overhead = 0;
+
+struct InternalEvent {
+  DWORD thread_id;
+
+  u32 name_size;
+  const char* name;
+
+  u64 time_start;
+  u64 time_end;
+};
 
 static constexpr u64 BUFFER_NUM = 2048;
-static Tracing::Event* buffer;
-static u64 buffer_top = 0;
+static InternalEvent* volatile buffer;
+static InternalEvent* volatile other_buffer;
+static volatile u64 buffer_top = 0;
+static volatile char buffer_mutex = '\0';
+
+static u32 want_buffer_signal = 0;
+static void get_buffer_priority(bool is_tracer) {
+  if (is_tracer) {
+    auto val = _InterlockedExchange(&want_buffer_signal, 1);
+    assert(val != 1);//only 1 tracer thread for now
+
+    while (true) {
+      char r = _InterlockedCompareExchange8(&buffer_mutex, '\1', '\0');
+      if (r == 1) {
+        val = _InterlockedExchange(&want_buffer_signal, 0);
+        assert(val != 0);//only 1 tracer thread for now
+        return;
+      }
+    }
+  }
+  else {
+    while (true) {
+      if (want_buffer_signal) continue;
+
+      char r = _InterlockedCompareExchange8(&buffer_mutex, '\1', '\0');
+      if (r == 1) {
+        return;
+      }
+    }
+  }
+}
+
+static void release_buffer() {
+  _InterlockedCompareExchange8(&buffer_mutex, '\0', '\1');
+}
+
 
 static bool comma = false;
 static HANDLE out_file_handle = INVALID_HANDLE_VALUE;
 static Tracing::u64 start_timer = 0;
 static Tracing::u64 freq = 0;
 
+static constexpr u32 OUT_BUFFER_SIZE = 1024 * 16;
+static u32 out_buffer_top = 0;
+static volatile u32 thread_counter = 0;
+static u8* out_buffer;
+
+static u64 num_profiles = 0;
+
 static HANDLE thread_handle = INVALID_HANDLE_VALUE;
 
-#define WRITE_STATIC_STRING(file, str) WriteFile(file, str, sizeof(str) - 1, 0, 0)
+static void flush_buffer() {
+  WriteFile(out_file_handle, out_buffer, out_buffer_top, NULL, 0);
+  out_buffer_top = 0;
+}
 
-#define INTERLOCKED_READ(var) _InterlockedCompareExchange(&var, 0, 0)
+static void write_u16(u16 u) {
+  if (out_buffer_top + 2 > OUT_BUFFER_SIZE) {
+    flush_buffer();
+  }
 
-static constexpr Tracing::u64 DEC_DIGITS[]{
-  1,
-  10,
-  100,
-  1000,
-  10000,
-  100000,
-  1000000,
-  10000000,
-  100000000,
-  1000000000,
-  10000000000,
-  100000000000,
-  1000000000000,
-  10000000000000,
-  100000000000000,
-  1000000000000000,
-  10000000000000000,
-  100000000000000000,
-  1000000000000000000,
-  10000000000000000000,
+  u8* buffer = out_buffer + out_buffer_top;
+
+  buffer[0] = u & 0xff;
+  buffer[1] = (u >> 8) & 0xff;
+
+  out_buffer_top += 2;
+}
+
+static void write_u32(u32 u) {
+  if (out_buffer_top + 4 > OUT_BUFFER_SIZE) {
+    flush_buffer();
+  }
+
+  u8* buffer = out_buffer + out_buffer_top;
+
+  buffer[0] = u & 0xff;
+  buffer[1] = (u >> 8) & 0xff;
+  buffer[2] = (u >> 16) & 0xff;
+  buffer[3] = (u >> 24) & 0xff;
+
+  out_buffer_top += 4;
+}
+
+static void write_u64(u64 u) {
+  if (out_buffer_top + 8 > OUT_BUFFER_SIZE) {
+    flush_buffer();
+  }
+
+  u8* buffer = out_buffer + out_buffer_top;
+
+  buffer[0] = u & 0xff;
+  buffer[1] = (u >> 8) & 0xff;
+  buffer[2] = (u >> 16) & 0xff;
+  buffer[3] = (u >> 24) & 0xff;
+  buffer[4] = (u >> 32) & 0xff;
+  buffer[5] = (u >> 40) & 0xff;
+  buffer[6] = (u >> 48) & 0xff;
+  buffer[7] = (u >> 56) & 0xff;
+
+  out_buffer_top += 8;
+}
+
+static void write_string(u32 name_size, const char* name) {
+  bool extra_null = name[name_size - 1] != '\0';
+
+  if (name_size + extra_null + out_buffer_top > OUT_BUFFER_SIZE) {
+    flush_buffer();
+  }
+
+  {
+    for (u32 i = 0; i < name_size; ++i) {
+      out_buffer[out_buffer_top + i] = name[i];
+    }
+
+    if (extra_null) {
+      out_buffer[out_buffer_top + name_size] = '\0';
+      out_buffer_top += name_size + 1;
+    }
+  }
+}
+
+static void write_single(const InternalEvent& e) {
+  num_profiles += 1;
+
+  write_u16(static_cast<u16>(e.thread_id));
+  write_u32(e.name_size);
+  write_string(e.name_size, e.name);
+  write_u64(e.time_start);
+  write_u64(e.time_end);
+}
+
+static constexpr u8 VERSION = 0;
+
+struct Header {
+  u8 version = VERSION;
 };
 
-template<typename T, size_t N>
-inline constexpr static size_t array_count(const T (&)[N]) {
-  return N;
+static void write_header(const Header& header) {
+  out_buffer[out_buffer_top] = header.version;
+  out_buffer_top += 1;
 }
 
-static void write_decimal_number(HANDLE file, Tracing::u64 num) {
-  if (num == 0) {
-    WriteFile(file, "0", 1, 0, 0);
-    return;
-  }
+struct Footer {
+  u16 num_threads;
+  u64 num_profiles;
+};
 
-  char buffer[array_count(DEC_DIGITS) + 1] ={ 0 };
-  u64 index = 0;
-
-  //Array count + 1 so that 0 can signal the finish
-  u64 max_ind = array_count(DEC_DIGITS);
-
-  //SHouldnt need to check if max_ind > 0 because num will always have digits
-  while (DEC_DIGITS[max_ind - 1] > num) {
-    max_ind -= 1;
-  }
-
-  while (max_ind > 0) {
-    const auto d_val = DEC_DIGITS[max_ind - 1];
-    Tracing::u64 dig = num / d_val;
-    num -= (dig * d_val);
-
-    buffer[index] = '0' + (char)dig;
-
-    max_ind -= 1;
-    index += 1;
-  }
-
-  //Index is now the size
-  WriteFile(file, buffer, index, 0, 0);
-  return;
-}
-
-void write_single(const Tracing::Event& e) {
-  WRITE_STATIC_STRING(out_file_handle, ",\n    {\"name\":\"");
-  WriteFile(out_file_handle, e.name, strlen(e.name), 0, 0);
-  WRITE_STATIC_STRING(out_file_handle, "\",\"pid\":0,\"ph\":\"B\",\"ts\":");
-
-  write_decimal_number(out_file_handle, e.time_start);
-
-  WRITE_STATIC_STRING(out_file_handle, "},\n    {\"name\":\"");
-  WriteFile(out_file_handle, e.name, strlen(e.name), 0, 0);
-  WRITE_STATIC_STRING(out_file_handle, "\",\"pid\":0,\"ph\":\"E\",\"ts\":");
-
-  write_decimal_number(out_file_handle, e.time_end);
-  WRITE_STATIC_STRING(out_file_handle, "}");
+static void write_footer(const Footer& footer) {
+  write_u16(footer.num_threads);
+  write_u64(footer.num_profiles);
 }
 
 static DWORD WINAPI tracer_thread_proc(LPVOID lpParameter) {
-  WRITE_STATIC_STRING(out_file_handle, "{\n  \"traceEvents\": [\n    {\"name\":\"Tracing Total\",\"pid\":0,\"ph\":\"B\",\"ts\":0}");
+  Header header = {};
+  write_header(header);
 
   while (true) {
-    const auto count = INTERLOCKED_READ(buffer_top);
-
-    if (INTERLOCKED_READ(signal) == 1) {
+    if (signal == 1) {
       const auto ed = Tracing::get_time();
 
-      MemoryBarrier();
-      for (u32 i = 0; i < count; i++) {
+      get_buffer_priority(true);
+      u32 top = (u32)buffer_top;
+      for (u32 i = 0; i < top; i++) {
         write_single(buffer[i]);
       }
+      release_buffer();
 
-      WRITE_STATIC_STRING(out_file_handle, ",\n    {\"name\":\"Tracing Total\",\"pid\":0,\"ph\":\"E\",\"ts\":");
-      write_decimal_number(out_file_handle, ed);
+      Footer footer = {};
+      footer.num_threads = thread_counter;
+      footer.num_profiles = num_profiles;
 
-      WRITE_STATIC_STRING(out_file_handle, "}\n  ]\n\n}");
-
-      CloseHandle(out_file_handle);
-      VirtualFree(buffer, 0, MEM_RELEASE);
+      write_footer(footer);
+      flush_buffer();
       return 0;
     }
 
+    if (buffer_top > 20) {
+      get_buffer_priority(true);
+      MemoryBarrier();
+      const auto size = _InterlockedExchange(&buffer_top, 0);
+      auto save = buffer;
+      buffer = other_buffer;
+      other_buffer = save;
+      release_buffer();
 
-    if (count == 0) {
-      Sleep(0);
-      continue;
+      for (u32 i = 0; i < size; i++) {
+        write_single(other_buffer[i]);
+      }
     }
-
-    MemoryBarrier();
-    Tracing::Event e = buffer[count - 1];
-
-    if (_InterlockedCompareExchange(&buffer_top, count - 1, count) != count) {
-      //Need to retry as someone else made an edit
-      continue;
-    }
-
-    //Success
-    write_single(e);
   }
 }
 
 void Tracing::start_tracer_threaded(const char* output_file_name) {
   overhead = 0;
 
-  LARGE_INTEGER la ={};
+  LARGE_INTEGER la = {};
 
   QueryPerformanceFrequency(&la);
 
-  freq = la.QuadPart / (1000 *  1000);
+  freq = la.QuadPart / (1000 * 1000);
 
   QueryPerformanceCounter(&la);
 
@@ -160,9 +232,17 @@ void Tracing::start_tracer_threaded(const char* output_file_name) {
   out_file_handle = CreateFileA(output_file_name, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
   assert(out_file_handle != INVALID_HANDLE_VALUE);
 
-  buffer = (Event*)VirtualAlloc(0, sizeof(Event) * BUFFER_NUM, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+  buffer = (InternalEvent*)VirtualAlloc(0, sizeof(InternalEvent) * BUFFER_NUM, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
   assert(buffer);
-  memset(buffer, 0, BUFFER_NUM *  sizeof(Event));
+  memset(buffer, 0, BUFFER_NUM * sizeof(Event));
+
+  other_buffer = (InternalEvent*)VirtualAlloc(0, sizeof(InternalEvent) * BUFFER_NUM, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+  assert(other_buffer);
+  memset(other_buffer, 0, BUFFER_NUM * sizeof(Event));
+
+  out_buffer = (u8*)VirtualAlloc(0, OUT_BUFFER_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+  assert(out_buffer);
+  memset(out_buffer, 0, OUT_BUFFER_SIZE);
 
   const auto check = _InterlockedCompareExchange(&buffer_top, 0, 0);
   assert(check == 0);
@@ -176,23 +256,38 @@ void Tracing::end_tracer_threaded() {
   assert(val == 0);
 
   WaitForSingleObject(thread_handle, INFINITE);
+
+  VirtualFree(buffer, 0, MEM_RELEASE);
+  VirtualFree(other_buffer, 0, MEM_RELEASE);
+  CloseHandle(out_file_handle);
 }
 
 Tracing::u64 Tracing::get_time() {
-  LARGE_INTEGER la ={};
+  LARGE_INTEGER la = {};
 
   QueryPerformanceCounter(&la);
 
   return (la.QuadPart / freq) - start_timer;
 }
 
+thread_local static u16 thread_id;
+
+void Tracing::new_traced_thread() {
+  thread_id = static_cast<u16>(_InterlockedIncrement(&thread_counter)) - 1;
+}
+
 void Tracing::upload_event(const Event& e) {
-  const auto val = _InterlockedIncrement(&buffer_top);
-  assert(val <= BUFFER_NUM);
+  InternalEvent ie = {};
+  ie.thread_id = thread_id;
+  ie.name = e.name;
+  ie.name_size = e.name_size;
+  ie.time_start = e.time_start;
+  ie.time_end = e.time_end;
 
-  buffer[val - 1] = e;
+  get_buffer_priority(false);
   MemoryBarrier();
-
-
-  //_interlockedadd64((volatile long long*)&overhead, st - ed);
+  u32 new_top = (u32)_InterlockedIncrement(&buffer_top);
+  assert(!(new_top > BUFFER_NUM));
+  buffer[new_top - 1] = ie;
+  release_buffer();
 }
