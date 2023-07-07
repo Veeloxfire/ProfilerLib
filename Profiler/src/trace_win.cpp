@@ -63,7 +63,7 @@ static void release_buffer() {
 static bool comma = false;
 static HANDLE out_file_handle = INVALID_HANDLE_VALUE;
 static Tracing::u64 start_timer = 0;
-static Tracing::u64 freq = 0;
+static Tracing::u64 perf_frequency = 0;
 
 static constexpr u32 OUT_BUFFER_SIZE = 1024 * 16;
 static u32 out_buffer_top = 0;
@@ -127,9 +127,7 @@ static void write_u64(u64 u) {
 }
 
 static void write_string(u32 name_size, const char* name) {
-  bool extra_null = name[name_size - 1] != '\0';
-
-  if (name_size + extra_null + out_buffer_top > OUT_BUFFER_SIZE) {
+  if (name_size + 1 + out_buffer_top > OUT_BUFFER_SIZE) {
     flush_buffer();
   }
 
@@ -138,10 +136,8 @@ static void write_string(u32 name_size, const char* name) {
       out_buffer[out_buffer_top + i] = name[i];
     }
 
-    if (extra_null) {
-      out_buffer[out_buffer_top + name_size] = '\0';
-      out_buffer_top += name_size + 1;
-    }
+    out_buffer[out_buffer_top + name_size] = '\0';
+    out_buffer_top += name_size + 1;
   }
 }
 
@@ -149,21 +145,25 @@ static void write_single(const InternalEvent& e) {
   num_profiles += 1;
 
   write_u16(static_cast<u16>(e.thread_id));
+
   write_u32(e.name_size);
   write_string(e.name_size, e.name);
   write_u64(e.time_start);
   write_u64(e.time_end);
 }
 
-static constexpr u8 VERSION = 0;
+static constexpr u8 VERSION = 1;
 
 struct Header {
   u8 version = VERSION;
+  u64 performance_frequency;
 };
 
 static void write_header(const Header& header) {
   out_buffer[out_buffer_top] = header.version;
   out_buffer_top += 1;
+
+  write_u64(header.performance_frequency);
 }
 
 struct Footer {
@@ -178,6 +178,7 @@ static void write_footer(const Footer& footer) {
 
 static DWORD WINAPI tracer_thread_proc(LPVOID lpParameter) {
   Header header = {};
+  header.performance_frequency = perf_frequency;
   write_header(header);
 
   while (true) {
@@ -223,11 +224,11 @@ void Tracing::start_tracer_threaded(const char* output_file_name) {
 
   QueryPerformanceFrequency(&la);
 
-  freq = la.QuadPart / (1000 * 1000);
+  perf_frequency = la.QuadPart;
 
   QueryPerformanceCounter(&la);
 
-  start_timer = la.QuadPart / freq;
+  start_timer = la.QuadPart;
 
   out_file_handle = CreateFileA(output_file_name, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
   assert(out_file_handle != INVALID_HANDLE_VALUE);
@@ -267,7 +268,7 @@ Tracing::u64 Tracing::get_time() {
 
   QueryPerformanceCounter(&la);
 
-  return (la.QuadPart / freq) - start_timer;
+  return la.QuadPart - start_timer;
 }
 
 thread_local static u16 thread_id;
