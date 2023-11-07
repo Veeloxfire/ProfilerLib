@@ -1,6 +1,7 @@
 .vs/
 Debug/
 x64/
+build/
 
 **.sln
 **.vcxproj
@@ -11,3 +12,12 @@ x64/
 
 
 **.exe
+
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+CmakeFiles/
+build/
+

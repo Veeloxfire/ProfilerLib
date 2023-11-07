@@ -1,7 +1,9 @@
-#include <stdlib.h>
+#include <cstdlib>
+#include <cstdio>
+
 #include <Windows.h>
-#include <stdio.h>
-#include "trace.h"
+
+#include <Tracer/trace.h>
 
 void random_wait() {
   TRACING_SCOPE("random wait");
@@ -11,7 +13,7 @@ void random_wait() {
 }
 
 int main() {
-  Tracing::start_tracer_threaded("./trace.json");
+  Tracing::start_tracer_threaded("./trace.trace");
 
   for (int i = 0; i < 50; i++) {
     printf("%d, ", i);
